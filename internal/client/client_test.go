@@ -1,0 +1,162 @@
+package client
+
+import (
+	"context"
+	"encoding/base64"
+	"encoding/json"
+	"fmt"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"runtime"
+	"testing"
+	"time"
+
+	"github.com/stretchr/testify/assert"
+)
+
+func TestWrapRateLimit(t *testing.T) {
+	start := time.Now()
+	first := true
+
+	h := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if first {
+			t.Log(start.Unix())
+			w.Header().Set("X-RateLimit-Limit", "1")
+			w.Header().Set("X-RateLimit-Remaining", "0")
+			w.Header().Set("X-RateLimit-Reset", fmt.Sprint(start.Add(time.Second).Unix()))
+			w.WriteHeader(http.StatusTooManyRequests)
+			first = !first
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	})
+
+	s := httptest.NewServer(h)
+	defer s.Close()
+
+	c := Wrap(s.Client(), StaticToken(""), WithRateLimit(), WithDebug(true))
+	r, err := c.Get(s.URL)
+	if err != nil {
+		t.Error(err)
+	}
+
+	if r.StatusCode != http.StatusOK {
+		t.Errorf("Expected status code to be %d but got %d", http.StatusOK, r.StatusCode)
+	}
+
+	elapsed := time.Since(start)
+	if elapsed < time.Second {
+		t.Errorf("Time since start is sooner than expected. Expected >= 1s but got %s", elapsed)
+	}
+}
+
+func TestWrapUserAgent(t *testing.T) {
+	testHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		ua := r.Header.Get("User-Agent")
+		if ua != UserAgent {
+			t.Errorf("Expected User-Agent header to match %q but got %q", UserAgent, ua)
+		}
+	})
+
+	testServer := httptest.NewServer(testHandler)
+	defer testServer.Close()
+
+	httpClient := Wrap(testServer.Client(), StaticToken(""), WithUserAgent(UserAgent))
+	_, err := httpClient.Get(testServer.URL)
+	assert.NoError(t, err)
+}
+
+func TestOAuth2ClientCredentialsAndAudience(t *testing.T) {
+	const expectedAudience = "myAudience"
+
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/oauth/token":
+			requestBody, err := io.ReadAll(r.Body)
+			assert.NoError(t, err)
+			assert.Contains(t, string(requestBody), expectedAudience)
+
+			w.Header().Set("Content-Type", "application/json")
+			_, err = w.Write([]byte(`{"access_token":"someToken","token_type":"Bearer"}`))
+			assert.NoError(t, err)
+		default:
+			http.NotFound(w, r)
+		}
+	})
+	testServer := httptest.NewServer(handler)
+
+	tokenSource := OAuth2ClientCredentialsAndAudience(
+		context.Background(),
+		testServer.URL,
+		"clientID",
+		"clientSecret",
+		expectedAudience,
+	)
+
+	token, err := tokenSource.Token()
+	assert.NoError(t, err)
+	assert.Equal(t, "someToken", token.AccessToken)
+}
+
+func TestWrapAuthokClientInfo(t *testing.T) {
+	t.Run("Default client", func(t *testing.T) {
+		testHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			header := r.Header.Get("Authok-Client")
+			authokClientDecoded, err := base64.StdEncoding.DecodeString(header)
+			assert.NoError(t, err)
+
+			var authokClient AuthokClientInfo
+			err = json.Unmarshal(authokClientDecoded, &authokClient)
+			assert.NoError(t, err)
+
+			assert.Equal(t, "authok-go", authokClient.Name)
+			assert.Equal(t, "latest", authokClient.Version)
+			assert.Equal(t, runtime.Version(), authokClient.Env["go"])
+		})
+
+		testServer := httptest.NewServer(testHandler)
+		t.Cleanup(func() {
+			testServer.Close()
+		})
+
+		httpClient := Wrap(testServer.Client(), StaticToken(""), WithAuthokClientInfo(DefaultAuthokClientInfo))
+		_, err := httpClient.Get(testServer.URL)
+		assert.NoError(t, err)
+	})
+
+	var testCases = []struct {
+		name     string
+		given    AuthokClientInfo
+		expected string
+	}{
+		{
+			name:     "Custom client",
+			given:    AuthokClientInfo{"foo", "1.0.0", map[string]string{"os": "windows"}},
+			expected: "eyJuYW1lIjoiZm9vIiwidmVyc2lvbiI6IjEuMC4wIiwiZW52Ijp7Im9zIjoid2luZG93cyJ9fQ==",
+		},
+		{
+			name:     "Missing information",
+			given:    AuthokClientInfo{Name: "foo"},
+			expected: "eyJuYW1lIjoiZm9vIiwidmVyc2lvbiI6IiJ9",
+		},
+	}
+
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			testHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				header := r.Header.Get("Authok-Client")
+				assert.Equal(t, testCase.expected, header)
+			})
+
+			testServer := httptest.NewServer(testHandler)
+			t.Cleanup(func() {
+				testServer.Close()
+			})
+
+			httpClient := Wrap(testServer.Client(), StaticToken(""), WithAuthokClientInfo(&testCase.given))
+			_, err := httpClient.Get(testServer.URL)
+			assert.NoError(t, err)
+		})
+	}
+}

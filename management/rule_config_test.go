@@ -1,0 +1,87 @@
+package management
+
+import (
+	"net/http"
+	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
+	"github.com/authok/authok-go"
+)
+
+func TestRuleConfigManager_Upsert(t *testing.T) {
+	configureHTTPTestRecordings(t)
+
+	key := "foo"
+	ruleConfig := &RuleConfig{Value: authok.String("bar")}
+
+	err := api.RuleConfig.Upsert(key, ruleConfig)
+	assert.NoError(t, err)
+	assert.Equal(t, key, ruleConfig.GetKey())
+
+	t.Cleanup(func() {
+		cleanupRuleConfig(t, ruleConfig.GetKey())
+	})
+}
+
+func TestRuleConfigManager_Read(t *testing.T) {
+	configureHTTPTestRecordings(t)
+
+	expected := givenARuleConfig(t)
+
+	actual, err := api.RuleConfig.Read(expected.GetKey())
+
+	assert.NoError(t, err)
+	assert.Equal(t, expected.GetKey(), actual.GetKey())
+}
+
+func TestRuleConfigManager_Delete(t *testing.T) {
+	configureHTTPTestRecordings(t)
+
+	ruleConfig := givenARuleConfig(t)
+
+	err := api.RuleConfig.Delete(ruleConfig.GetKey())
+	assert.NoError(t, err)
+
+	actualRuleConfig, err := api.RuleConfig.Read(ruleConfig.GetKey())
+	assert.Empty(t, actualRuleConfig)
+	assert.Error(t, err)
+	assert.Implements(t, (*Error)(nil), err)
+	assert.Equal(t, http.StatusNotFound, err.(Error).Status())
+}
+
+func TestRuleConfigManager_List(t *testing.T) {
+	configureHTTPTestRecordings(t)
+
+	ruleConfig := givenARuleConfig(t)
+
+	ruleConfigs, err := api.RuleConfig.List()
+
+	assert.NoError(t, err)
+	assert.Len(t, ruleConfigs, 1)
+	assert.Equal(t, ruleConfig.GetKey(), ruleConfigs[0].GetKey())
+}
+
+func givenARuleConfig(t *testing.T) *RuleConfig {
+	t.Helper()
+
+	key := "foo"
+	ruleConfig := &RuleConfig{Value: authok.String("bar")}
+
+	err := api.RuleConfig.Upsert(key, ruleConfig)
+	require.NoError(t, err)
+
+	t.Cleanup(func() {
+		cleanupRuleConfig(t, ruleConfig.GetKey())
+	})
+
+	return ruleConfig
+}
+
+func cleanupRuleConfig(t *testing.T, key string) {
+	t.Helper()
+
+	err := api.RuleConfig.Delete(key)
+	require.NoError(t, err)
+}

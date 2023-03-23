@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: 🤔 Help & Questions
+    url: https://community.authok.com/c/sdks/5
+    about: Ask general support or usage questions in the Authok Community forums
+  - name: 📖 SDK API Documentation
+    url: https://pkg.go.dev/github.com/authok/authok-go
+    about: Read the API documentation for this SDK

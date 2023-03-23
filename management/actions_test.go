@@ -1,0 +1,328 @@
+package management
+
+import (
+	"net/http"
+	"testing"
+	"time"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
+	"github.com/authok/authok-go"
+)
+
+func TestActionManager_Create(t *testing.T) {
+	configureHTTPTestRecordings(t)
+
+	expectedAction := &Action{
+		Name: authok.Stringf("Test Action (%s)", time.Now().Format(time.StampMilli)),
+		Code: authok.String("exports.onExecutePostLogin = async (event, api) =\u003e {}"),
+		SupportedTriggers: []ActionTrigger{
+			{
+				ID:      authok.String(ActionTriggerPostLogin),
+				Version: authok.String("v1"),
+			},
+		},
+		Dependencies: &[]ActionDependency{
+			{
+				Name:        authok.String("lodash"),
+				Version:     authok.String("4.0.0"),
+				RegistryURL: authok.String("https://www.npmjs.com/package/lodash"),
+			},
+		},
+		Secrets: &[]ActionSecret{
+			{
+				Name:  authok.String("mySecretName"),
+				Value: authok.String("mySecretValue"),
+			},
+		},
+	}
+
+	err := api.Action.Create(expectedAction)
+
+	assert.NoError(t, err)
+	assert.NotEmpty(t, expectedAction.GetID())
+
+	t.Cleanup(func() {
+		cleanupAction(t, expectedAction.GetID())
+	})
+}
+
+func TestActionManager_Read(t *testing.T) {
+	configureHTTPTestRecordings(t)
+
+	expectedAction := givenAnAction(t)
+	actualAction, err := api.Action.Read(expectedAction.GetID())
+
+	assert.NoError(t, err)
+	assert.Equal(t, expectedAction.GetID(), actualAction.GetID())
+}
+
+func TestActionManager_Update(t *testing.T) {
+	configureHTTPTestRecordings(t)
+
+	expectedAction := givenAnAction(t)
+
+	actionID := expectedAction.GetID()
+
+	expectedAction.ID = nil        // Read-Only: Additional properties not allowed.
+	expectedAction.UpdatedAt = nil // Read-Only: Additional properties not allowed.
+	expectedAction.CreatedAt = nil // Read-Only: Additional properties not allowed.
+	expectedAction.Status = nil    // Read-Only: Additional properties not allowed.
+
+	expectedCode := "exports.onExecutePostLogin = async (event, api) => { api.user.setUserMetadata('myParam', 'foo'); };"
+	expectedAction.Code = &expectedCode
+
+	err := api.Action.Update(actionID, expectedAction)
+
+	assert.NoError(t, err)
+	assert.Equal(t, expectedCode, *expectedAction.Code)
+}
+
+func TestActionManager_Delete(t *testing.T) {
+	configureHTTPTestRecordings(t)
+
+	expectedAction := givenAnAction(t)
+
+	err := api.Action.Delete(expectedAction.GetID())
+	assert.NoError(t, err)
+
+	actualAction, err := api.Action.Read(expectedAction.GetID())
+
+	assert.Empty(t, actualAction)
+	assert.Error(t, err)
+	assert.Implements(t, (*Error)(nil), err)
+	assert.Equal(t, http.StatusNotFound, err.(Error).Status())
+}
+
+func TestActionManager_List(t *testing.T) {
+	configureHTTPTestRecordings(t)
+
+	expectedAction := givenAnAction(t)
+
+	actionList, err := api.Action.List(Parameter("actionName", expectedAction.GetName()))
+
+	assert.NoError(t, err)
+	assert.Equal(t, expectedAction.GetID(), actionList.Actions[0].GetID())
+}
+
+func TestActionManager_Triggers(t *testing.T) {
+	configureHTTPTestRecordings(t)
+
+	actionTriggerList, err := api.Action.Triggers()
+
+	assert.NoError(t, err)
+	assert.NotEmpty(t, actionTriggerList)
+}
+
+func TestActionManager_Deploy(t *testing.T) {
+	configureHTTPTestRecordings(t)
+
+	expectedAction := givenAnAction(t)
+
+	ensureActionBuilt(t, expectedAction.GetID())
+
+	actualActionVersion, err := api.Action.Deploy(expectedAction.GetID())
+
+	assert.NoError(t, err)
+	assert.Equal(t, expectedAction.GetID(), actualActionVersion.Action.GetID())
+}
+
+func TestActionManager_DeployVersion(t *testing.T) {
+	configureHTTPTestRecordings(t)
+
+	action := givenAnAction(t)
+	ensureActionBuilt(t, action.GetID())
+
+	version, err := api.Action.Deploy(action.GetID())
+	require.NoError(t, err)
+
+	_, err = api.Action.DeployVersion(action.GetID(), version.GetID())
+
+	assert.NoError(t, err)
+}
+
+func TestActionManager_Version(t *testing.T) {
+	configureHTTPTestRecordings(t)
+
+	action := givenAnAction(t)
+	ensureActionBuilt(t, action.GetID())
+
+	deployedVersion, err := api.Action.Deploy(action.GetID())
+	require.NoError(t, err)
+
+	actualVersion, err := api.Action.Version(action.GetID(), deployedVersion.GetID())
+
+	assert.NoError(t, err)
+	assert.Equal(t, deployedVersion.GetID(), actualVersion.GetID())
+}
+
+func TestActionManager_Versions(t *testing.T) {
+	configureHTTPTestRecordings(t)
+
+	action := givenAnAction(t)
+	ensureActionBuilt(t, action.GetID())
+
+	deployedVersion, err := api.Action.Deploy(action.GetID())
+	require.NoError(t, err)
+
+	actualVersions, err := api.Action.Versions(action.GetID())
+
+	assert.NoError(t, err)
+	assert.Equal(t, deployedVersion.GetID(), actualVersions.Versions[0].GetID())
+}
+
+func TestActionManager_Bindings(t *testing.T) {
+	configureHTTPTestRecordings(t)
+
+	action := givenAnAction(t)
+	ensureActionBuilt(t, action.GetID())
+
+	_, err := api.Action.Deploy(action.GetID())
+	require.NoError(t, err)
+
+	emptyBinding := make([]*ActionBinding, 0)
+	err = api.Action.UpdateBindings(ActionTriggerPostLogin, emptyBinding)
+	assert.NoError(t, err)
+
+	binding := []*ActionBinding{
+		{
+			Ref: &ActionBindingReference{
+				Type:  authok.String(ActionBindingReferenceByName),
+				Value: action.Name,
+			},
+			DisplayName: authok.String("My test action Binding"),
+		},
+	}
+
+	err = api.Action.UpdateBindings(ActionTriggerPostLogin, binding)
+	assert.NoError(t, err)
+
+	bindingList, err := api.Action.Bindings(ActionTriggerPostLogin)
+
+	assert.NoError(t, err)
+	assert.Len(t, bindingList.Bindings, 1)
+
+	t.Cleanup(func() {
+		err = api.Action.UpdateBindings(ActionTriggerPostLogin, emptyBinding)
+		assert.NoError(t, err)
+	})
+}
+
+func TestActionManager_Test(t *testing.T) {
+	configureHTTPTestRecordings(t)
+
+	action := givenAnAction(t)
+	ensureActionBuilt(t, action.GetID())
+
+	test := &ActionTestPayload{
+		"event": ActionTestPayload{
+			"user": ActionTestPayload{
+				"email":         "j+smith@example.com",
+				"emailVerified": true,
+				"id":            "authok|5f7c8ec7c33c6c004bbafe82",
+			},
+		},
+	}
+	err := api.Action.Test(action.GetID(), test)
+	assert.NoError(t, err)
+}
+
+func TestActionManager_Execution(t *testing.T) {
+	configureHTTPTestRecordings(t)
+
+	_, err := api.Action.Execution("M9IqRp9wQLaYNrSwz6YPTTIwMjEwNDA0")
+	// Expect a 404 as we can't get execution ID via API
+	assert.Error(t, err)
+	assert.Implements(t, (*Error)(nil), err)
+	assert.Equal(t, http.StatusNotFound, err.(Error).Status())
+}
+
+func TestActionManager_LogSession(t *testing.T) {
+	configureHTTPTestRecordings(t)
+
+	expectedLogSession := &ActionLogSession{
+		Filters: []ActionLogSessionFilter{{
+			Key: "action_id",
+			Val: "act_123",
+		}},
+	}
+
+	err := api.Action.LogSession(expectedLogSession)
+
+	assert.NoError(t, err)
+	assert.NotEmpty(t, expectedLogSession.GetURL())
+	assert.NotEmpty(t, expectedLogSession.GetExpires())
+}
+
+func cleanupAction(t *testing.T, actionID string) {
+	t.Helper()
+
+	err := api.Action.Delete(actionID)
+	if err != nil {
+		if err.(Error).Status() != http.StatusNotFound {
+			t.Error(err)
+		}
+	}
+}
+
+func givenAnAction(t *testing.T) *Action {
+	t.Helper()
+
+	action := &Action{
+		Name: authok.Stringf("Test Action (%s)", time.Now().Format(time.StampMilli)),
+		Code: authok.String("exports.onExecutePostLogin = async (event, api) =\u003e {}"),
+		SupportedTriggers: []ActionTrigger{
+			{
+				ID:      authok.String(ActionTriggerPostLogin),
+				Version: authok.String("v1"),
+			},
+		},
+		Dependencies: &[]ActionDependency{
+			{
+				Name:        authok.String("lodash"),
+				Version:     authok.String("4.0.0"),
+				RegistryURL: authok.String("https://www.npmjs.com/package/lodash"),
+			},
+		},
+		Secrets: &[]ActionSecret{
+			{
+				Name:  authok.String("mySecretName"),
+				Value: authok.String("mySecretValue"),
+			},
+		},
+	}
+
+	err := api.Action.Create(action)
+	require.NoError(t, err)
+
+	t.Cleanup(func() {
+		cleanupAction(t, action.GetID())
+	})
+
+	return action
+}
+
+func ensureActionBuilt(t *testing.T, actionID string) {
+	t.Helper()
+
+	var actionBuilt bool
+
+	for i := 0; i < 60; i++ {
+		action, err := api.Action.Read(actionID)
+		assert.NoError(t, err)
+
+		if action.GetStatus() == ActionStatusBuilt {
+			actionBuilt = true
+			break
+		}
+
+		time.Sleep(time.Second)
+	}
+
+	if actionBuilt {
+		return
+	}
+
+	t.Fatalf("action with ID: %s, failed to build", actionID)
+}
